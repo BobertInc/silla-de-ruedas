@@ -11,8 +11,8 @@
 #define STBY 23
 
 #define ANGLE_DEADZONE 20
-#define MAX_PWM 255
-#define TURN_STRENGTH 0.5
+#define MAX_PWM 110
+#define TURN_STRENGTH 1
 #define RAMP_STEP 4
 #define SIGNAL_TIMEOUT 500
 
@@ -35,7 +35,12 @@ int currentLeftPWM = 0;
 int currentRightPWM = 0;
 
 void driveMotor(int pwm, int in1, int in2, int pwmPin) {
-  pwm = constrain(pwm, -255, 255);
+  if (pwmPin != PWMA) {
+    pwm = constrain(pwm, -255, 255);
+  } else {
+    pwm = pwm * 1.25;
+    pwm = constrain(pwm, -255, 255);
+  }
 
   if (pwm > 0) {
     digitalWrite(in1, HIGH);
@@ -52,7 +57,6 @@ void driveMotor(int pwm, int in1, int in2, int pwmPin) {
     digitalWrite(in2, LOW);
     analogWrite(pwmPin, 0);
   }
-  
 }
 
 void setup() {
@@ -81,7 +85,7 @@ void loop() {
     driveMotor(0, AIN1, AIN2, PWMA);
     driveMotor(0, BIN1, BIN2, PWMB);
     return;
-  }
+  }                                                                                                                                                     
 
   float x = incomingData.x;
   float y = incomingData.y;
@@ -95,9 +99,11 @@ void loop() {
   int steering = map(constrain((int)x, -45, 45), -45, 45, -MAX_PWM * TURN_STRENGTH, MAX_PWM * TURN_STRENGTH);
 
   // DIFFERENTIAL DRIVE
+
   int targetLeft = throttle + steering;
   int targetRight = throttle - steering;
-
+  if (targetLeft < 60) targetLeft = 0;
+  if (targetRight < 60) targetRight = 0;
   targetLeft = constrain(targetLeft, -MAX_PWM, MAX_PWM);
   targetRight = constrain(targetRight, -MAX_PWM, MAX_PWM);
 
