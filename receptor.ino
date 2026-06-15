@@ -1,5 +1,9 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <Wire.h>
+
+TwoWire I2C_Left = TwoWire(0);
+TwoWire I2C_Right = TwoWire(1);
 
 #define AIN1 16
 #define AIN2 17
@@ -15,7 +19,7 @@
 #define TURN_STRENGTH 1
 #define RAMP_STEP 4
 #define SIGNAL_TIMEOUT 500
-
+#define SYNC_GAIN 0.1
 // ESP NOW COMMUNICATION
 typedef struct {
   float x;
@@ -35,12 +39,7 @@ int currentLeftPWM = 0;
 int currentRightPWM = 0;
 
 void driveMotor(int pwm, int in1, int in2, int pwmPin) {
-  if (pwmPin != PWMA) {
-    pwm = constrain(pwm, -255, 255);
-  } else {
-    pwm = pwm * 1.25;
-    pwm = constrain(pwm, -255, 255);
-  }
+  pwm = constrain(pwm, -255, 255);
 
   if (pwm > 0) {
     digitalWrite(in1, HIGH);
@@ -57,6 +56,58 @@ void driveMotor(int pwm, int in1, int in2, int pwmPin) {
     digitalWrite(in2, LOW);
     analogWrite(pwmPin, 0);
   }
+}
+
+int prevLeftAngle = 0;
+int prevRightAngle = 0;
+
+float leftSpeed = 0;
+float rightSpeed = 0;
+
+unsigned long prevSpeedTime = 0;
+
+uint16_t readAS5600(TwoWire &bus)
+{
+    bus.beginTransmission(0x36);
+    bus.write(0x0E);
+    bus.endTransmission(false);
+
+    bus.requestFrom(0x36, 2);
+
+    uint16_t angle =
+        (bus.read() << 8) |
+        bus.read();
+
+    return angle & 0x0FFF;
+}
+
+void updateWheelSpeeds()
+{
+    unsigned long now = millis();
+    float dt = (now - prevSpeedTime) / 1000.0f;
+
+    if(dt <= 0)
+        return;
+
+    int leftAngle = readAS5600(I2C_Left);
+    int rightAngle = readAS5600(I2C_Right);
+
+    int leftDelta = leftAngle - prevLeftAngle;
+    int rightDelta = rightAngle - prevRightAngle;
+
+    // Handle wraparound
+    if(leftDelta > 2048) leftDelta -= 4096;
+    if(leftDelta < -2048) leftDelta += 4096;
+
+    if(rightDelta > 2048) rightDelta -= 4096;
+    if(rightDelta < -2048) rightDelta += 4096;
+
+    leftSpeed = leftDelta / dt;
+    rightSpeed = rightDelta / dt;
+
+    prevLeftAngle = leftAngle;
+    prevRightAngle = rightAngle;
+    prevSpeedTime = now;
 }
 
 void setup() {
@@ -77,16 +128,25 @@ void setup() {
     return;
   }
   esp_now_register_recv_cb(OnDataRecv);
+
+  I2C_Left.begin(33, 32, 400000);      // SDA,SCL MOTOR A
+  I2C_Right.begin(26, 25, 400000);   // SDA,SCL MOTOR B
+  // delay?
+  prevLeftAngle = readAS5600(I2C_Left);
+  prevRightAngle = readAS5600(I2C_Right);
+  prevSpeedTime = millis();
 }
 
 void loop() {
+  updateWheelSpeeds();
+
   // FAILSAFE SIGNAL DELAY
   if (millis() - lastPacketTime > SIGNAL_TIMEOUT) {
     driveMotor(0, AIN1, AIN2, PWMA);
     driveMotor(0, BIN1, BIN2, PWMB);
     return;
   }                                                                                                                                                     
-
+  
   float x = incomingData.x;
   float y = incomingData.y;
 
@@ -102,11 +162,25 @@ void loop() {
 
   int targetLeft = throttle + steering;
   int targetRight = throttle - steering;
-  if (targetLeft < 60) targetLeft = 0;
-  if (targetRight < 60) targetRight = 0;
+  if (abs(targetLeft) < 60) targetLeft = 0;
+  if (abs(targetRight) < 60) targetRight = 0;
   targetLeft = constrain(targetLeft, -MAX_PWM, MAX_PWM);
   targetRight = constrain(targetRight, -MAX_PWM, MAX_PWM);
 
+  if (abs(throttle) > 20 && abs(steering) < 20) {
+    
+    float speedError = leftSpeed - rightSpeed;
+
+    int correction = speedError * SYNC_GAIN;
+
+    targetLeft -= correction;
+    targetRight += correction;
+  
+  }
+
+  targetLeft = constrain(targetLeft, -MAX_PWM, MAX_PWM);
+  targetRight = constrain(targetRight, -MAX_PWM, MAX_PWM);
+  
   // RAMPING
   if (currentLeftPWM < targetLeft) currentLeftPWM += RAMP_STEP;
   if (currentLeftPWM > targetLeft) currentLeftPWM -= RAMP_STEP;
@@ -121,5 +195,15 @@ void loop() {
   Serial.print(currentLeftPWM);
   Serial.print(" R: ");
   Serial.println(currentRightPWM);
+
+  Serial.print(" LS:");
+  Serial.print(leftSpeed);
+
+  Serial.print(" RS:");
+  Serial.print(rightSpeed);
+
+  Serial.print(" ERR:");
+  Serial.println(leftSpeed - rightSpeed);
+
   delay(20);
 }
